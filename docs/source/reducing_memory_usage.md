@@ -195,6 +195,8 @@ Padding-free batching is an alternative approach for reducing memory usage. In t
 
 > [!WARNING]
 > It's highly recommended to use padding-free batching with **FlashAttention 2** or **FlashAttention 3**. Otherwise, you may encounter batch contamination issues.
+>
+> Hybrid models with linear-attention layers (e.g. Qwen3.5's Gated DeltaNet) also need `flash-linear-attention` and `causal-conv1d` installed: the trainer passes the sequence boundaries to these layers, but their PyTorch fallbacks ignore them and carry state from one sequence into the next.
 
 <hfoptions id="padding-free">
 <hfoption id="DPO">

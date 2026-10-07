@@ -1228,6 +1228,46 @@ class TestSFTTrainer(TrlTestCase):
             new_param = trainer.model.get_parameter(n)
             assert not torch.equal(param, new_param), f"Parameter {n} has not changed."
 
+    @pytest.mark.skipif(
+        Version(transformers.__version__) < Version("5.2.0"),
+        reason="Qwen3.5 models were introduced in transformers-5.2.0",
+    )
+    def test_padding_free_linear_attention_does_not_leak_across_sequences(self):
+        # Qwen3.5's Gated DeltaNet layers run a recurrent scan and a causal conv along the sequence, so in a
+        # padding-free row they must restart at every sequence boundary. Only the flash-linear-attention and
+        # causal-conv1d kernels honor the boundaries passed by the trainer: the PyTorch fallbacks ignore them.
+        pytest.importorskip("fla")
+        pytest.importorskip("causal_conv1d")
+        model_id = "trl-internal-testing/tiny-Qwen3_5ForConditionalGeneration-NoThink"
+        dataset = Dataset.from_dict({"input_ids": [list(range(1, 13)), list(range(20, 29)), list(range(40, 55))]})
+        training_args = SFTConfig(
+            output_dir=self.tmp_dir,
+            padding_free=True,
+            max_length=None,  # padding-free without packing doesn't enforce max_length
+            loss_type="nll",  # unlike "chunked_nll", returns the logits
+            model_init_kwargs={"dtype": "float32"},
+            report_to="none",
+        )
+        trainer = SFTTrainer(
+            model=model_id,
+            args=training_args,
+            train_dataset=dataset,
+            processing_class=AutoTokenizer.from_pretrained(model_id),  # text-only: no image processor needed
+        )
+        examples = list(trainer.train_dataset)
+        device = trainer.model.device
+        inputs = {key: value.to(device) for key, value in trainer.data_collator(examples).items()}
+
+        with torch.no_grad():
+            _, outputs = trainer.compute_loss(trainer.model, inputs, return_outputs=True)
+            unpacked_logits = [
+                trainer.model(input_ids=torch.tensor([example["input_ids"]], device=device), use_cache=False).logits
+                for example in examples
+            ]
+
+        # Each sequence's logits must not depend on the sequences packed before it
+        torch.testing.assert_close(outputs.logits, torch.cat(unpacked_logits, dim=1), atol=1e-3, rtol=1e-3)
+
     @pytest.mark.parametrize("packing_strategy", ["bfd", "wrapped"])
     @ignore_warnings(message="You are using packing, but the attention implementation is not.*", category=UserWarning)
     @ignore_warnings(message="Padding-free training is enabled, but the attention.*", category=UserWarning)

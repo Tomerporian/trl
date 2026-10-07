@@ -1467,12 +1467,21 @@ class AsyncGRPOTrainer(_BaseTrainer):
         position_ids = inputs["position_ids"][mask_bool].unsqueeze(0)
         advantages = inputs["advantages"][mask_bool].unsqueeze(0)
 
+        # FlashAttention derives the sequence boundaries from the `position_ids` resets, but linear-attention layers
+        # (e.g. Qwen3.5's Gated DeltaNet) need them passed explicitly, otherwise their recurrent state (`cu_seq_lens_q`)
+        # and causal conv (`seq_idx`) carry over from one packed sequence into the next.
+        seq_idx = ((position_ids == 0).cumsum(1) - 1).int()
+        starts = (position_ids[0] == 0).nonzero()[:, 0]
+        cu_seq_lens = torch.cat([starts, starts.new_tensor([position_ids.size(1)])]).int()
+
         forward_start = time.time()
         # MoE models: request router logits so the forward returns the load-balancing loss
         router_kwargs = {"output_router_logits": True} if self.aux_loss_enabled else {}
         outputs = model(
             input_ids=input_ids,
             position_ids=position_ids,
+            cu_seq_lens_q=cu_seq_lens,
+            seq_idx=seq_idx,
             labels=input_ids.masked_fill(completion_mask == 0, -100),
             fused_lm_head=True,
             **router_kwargs,

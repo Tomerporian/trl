@@ -1859,6 +1859,15 @@ class SFTTrainer(_BaseTrainer):
         # If not set, defaults from model config and may warn since cache isn't compatible with gradient checkpointing
         inputs["use_cache"] = False
 
+        # FlashAttention derives the sequence boundaries from the `position_ids` resets, but linear-attention layers
+        # (e.g. Qwen3.5's Gated DeltaNet) need them passed explicitly, otherwise their recurrent state (`cu_seq_lens_q`)
+        # and causal conv (`seq_idx`) carry over from one packed sequence into the next.
+        if self.padding_free:
+            position_ids = inputs["position_ids"]
+            inputs["seq_idx"] = ((position_ids == 0).cumsum(1) - 1).int()
+            starts = (position_ids[0] == 0).nonzero()[:, 0]
+            inputs["cu_seq_lens_q"] = torch.cat([starts, starts.new_tensor([position_ids.size(1)])]).int()
+
         # MoE models: request router logits so the model returns `outputs.aux_loss`. VLM wrappers honor this only
         # as a forward kwarg (not from the model config), so it must be passed here.
         if self.aux_loss_enabled:

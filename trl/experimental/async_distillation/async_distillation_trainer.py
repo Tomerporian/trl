@@ -1299,6 +1299,13 @@ class AsyncDistillationTrainer(_BaseTrainer):
         # renormalized, which is an acceptable trade-off for what should be a rare, teacher-side data gap.
         token_mask_1d = (completion_mask.bool() & has_teacher_signal)[0]  # (seq_len - 1,), batch dim always 1
 
+        # FlashAttention derives the sequence boundaries from the `position_ids` resets, but linear-attention layers
+        # (e.g. Qwen3.5's Gated DeltaNet) need them passed explicitly, otherwise their recurrent state (`cu_seq_lens_q`)
+        # and causal conv (`seq_idx`) carry over from one packed sequence into the next.
+        seq_idx = ((position_ids == 0).cumsum(1) - 1).int()
+        starts = (position_ids[0] == 0).nonzero()[:, 0]
+        cu_seq_lens = torch.cat([starts, starts.new_tensor([position_ids.size(1)])]).int()
+
         # Memory-efficient path: get the student's backbone hidden states (skip `lm_head`, so this alone never
         # materializes a vocab-sized tensor), then project only the *valid* positions' hidden states through
         # `lm_head` in `_CHUNKED_LM_HEAD_CHUNK_SIZE`-sized chunks (see `_chunked_jsd_loss`), never materializing more
@@ -1313,7 +1320,11 @@ class AsyncDistillationTrainer(_BaseTrainer):
         forward_start = time.time()
         with self.accelerator.autocast():
             hidden_states = unwrapped_model.base_model(
-                input_ids=input_ids, position_ids=position_ids, use_cache=False
+                input_ids=input_ids,
+                position_ids=position_ids,
+                cu_seq_lens_q=cu_seq_lens,
+                seq_idx=seq_idx,
+                use_cache=False,
             ).last_hidden_state
         self._last_forward_time_s = time.time() - forward_start
         hidden_states = hidden_states[:, :-1, :][0]  # (seq_len - 1, H), drop the unused last-position prediction
